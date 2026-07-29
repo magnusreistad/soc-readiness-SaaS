@@ -452,8 +452,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               <LogoIcon />
             </span>
             <span className="flex-1 text-left min-w-0">
-              <span className="block text-xs font-semibold text-gray-900 dark:text-gray-100 truncate">Vendor Threat</span>
-              <span className="block text-xs text-gray-500 dark:text-gray-500 truncate">Monitor · SOC 2 Type 2</span>
+              <span className="block text-xs font-semibold text-gray-900 dark:text-gray-100 truncate">SOC Readiness</span>
+              <span className="block text-xs text-gray-500 dark:text-gray-500 truncate">SOC 2 Type 2</span>
             </span>
             <span className="text-gray-400 shrink-0">
               <ChevronDownIcon size={14} />

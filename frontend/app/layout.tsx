@@ -3,7 +3,7 @@ import './globals.css'
 import { ThemeProvider } from '@/components/ThemeProvider'
 
 export const metadata: Metadata = {
-  title: 'Vendor Threat Monitor',
+  title: 'SOC Readiness SaaS',
   description: 'SOC 2 Compliance Platform',
 }
 
