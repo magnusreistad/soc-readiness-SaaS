@@ -1,0 +1,32 @@
+# Web framework
+fastapi==0.135.2
+uvicorn==0.42.0
+
+# Database
+psycopg2-binary==2.9.11
+
+# Auth
+PyJWT==2.12.1
+
+# AI
+openai==2.26.0
+
+# Config
+python-dotenv==1.2.2
+
+# Validation
+pydantic==2.12.5
+email-validator==2.3.0
+
+# HTTP client
+httpx==0.28.1
+
+# Threat intel collector
+feedparser==6.0.12
+RapidFuzz==3.14.3
+
+# Document handling (evidence uploads / reports)
+python-docx==1.2.0
+PyMuPDF==1.27.2.2
+openpyxl==3.1.5
+reportlab==4.4.10
