@@ -1,4 +1,4 @@
-# Vendor Threat Monitor
+# SOC Readiness SaaS Platform
 
 A SOC 2 examination workflow platform for internal GRC teams preparing for Type 1
 and Type 2 audits — control inventory, evidence collection, AI-assisted evidence
@@ -194,6 +194,13 @@ claim that it's finished:
   that lived there was removed once its only caller, the Flask `threat_monitor`
   blueprint, was deleted; nothing in the current FastAPI/Next.js stack generates
   PDF exports yet.
+- **`npm audit`** reports 3 high-severity advisories (PostCSS XSS/path traversal, 
+  sharp/libvips CVEs) in dependencies bundled internally by Next.js's image 
+  optimization pipeline. As of Next.js 16.2.12 (the latest release at time of 
+  writing), no patched version is yet available upstream. Confirmed unreachable 
+  in this app: no usage of next/image or sharp anywhere in the codebase (verified 
+  via grep — zero matches outside node_modules). Will resolve automatically on 
+  the next Next.js patch release.
 
 ---
 
