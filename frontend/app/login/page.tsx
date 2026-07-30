@@ -6,12 +6,19 @@ import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase'
 import Link from "next/link"
 
+// Only set on the public demo deployment (see .env.demo.example) — absent
+// entirely on the real production frontend, so this stays a no-op there.
+const DEMO_EMAIL    = process.env.NEXT_PUBLIC_DEMO_EMAIL
+const DEMO_PASSWORD = process.env.NEXT_PUBLIC_DEMO_PASSWORD
+const DEMO_ENABLED  = Boolean(DEMO_EMAIL && DEMO_PASSWORD)
+
 function LoginPageContent() {
   const router = useRouter()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [demoLoading, setDemoLoading] = useState(false)
   const [successMessage, setSuccessMessage] = useState('')
 
   useEffect(() => {
@@ -20,18 +27,34 @@ function LoginPageContent() {
     if (msg) setSuccessMessage(msg)
   }, [])
 
+  async function signIn(loginEmail: string, loginPassword: string) {
+    const supabase = createClient()
+    const { error } = await supabase.auth.signInWithPassword({
+      email: loginEmail,
+      password: loginPassword,
+    })
+    if (error) {
+      setError(error.message)
+      return false
+    }
+    router.push('/')
+    router.refresh()
+    return true
+  }
+
   async function handleLogin() {
     setLoading(true)
     setError('')
-    const supabase = createClient()
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) {
-      setError(error.message)
-      setLoading(false)
-    } else {
-      router.push('/')
-      router.refresh()
-    }
+    const ok = await signIn(email, password)
+    if (!ok) setLoading(false)
+  }
+
+  async function handleDemoLogin() {
+    if (!DEMO_EMAIL || !DEMO_PASSWORD) return
+    setDemoLoading(true)
+    setError('')
+    const ok = await signIn(DEMO_EMAIL, DEMO_PASSWORD)
+    if (!ok) setDemoLoading(false)
   }
 
   return (
@@ -57,6 +80,22 @@ function LoginPageContent() {
           {successMessage && (
             <div className="mb-4 rounded-lg bg-green-50 border border-green-200 text-green-700 px-4 py-3 text-sm">
               {successMessage}
+            </div>
+          )}
+
+          {DEMO_ENABLED && (
+            <div className="mb-6 rounded-lg bg-indigo-50 border border-indigo-100 px-4 py-3 text-center">
+              <p className="text-sm text-indigo-900 mb-2">
+                Want to explore first? Try the live demo — no signup required.
+              </p>
+              <button
+                type="button"
+                onClick={handleDemoLogin}
+                disabled={demoLoading}
+                className="w-full bg-white border border-indigo-300 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 font-medium py-2 rounded-lg text-sm transition-colors"
+              >
+                {demoLoading ? 'Loading demo…' : 'View Demo'}
+              </button>
             </div>
           )}
 

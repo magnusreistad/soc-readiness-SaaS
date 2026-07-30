@@ -40,6 +40,20 @@ from jwt.exceptions import InvalidTokenError
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
 
+# ---------------------------------------------------------------------------
+# Demo mode config
+#
+# When DEMO_MODE=true, all mutating requests (POST/PATCH/DELETE) against the
+# org identified by DEMO_ORG_ID are blocked with a friendly 403. Read (GET)
+# requests are unaffected. Both env vars are unset in a normal deployment, so
+# this is a no-op unless explicitly configured — see scripts/seed_demo_data.py.
+# ---------------------------------------------------------------------------
+
+DEMO_MODE   = os.getenv("DEMO_MODE", "false").strip().lower() == "true"
+DEMO_ORG_ID = int(os.getenv("DEMO_ORG_ID", "0") or 0)
+
+DEMO_READONLY_MESSAGE = "This is a read-only demo. Sign up to try this with your own data."
+
 logger  = logging.getLogger(__name__)
 _bearer = HTTPBearer(auto_error=True)
 
@@ -150,11 +164,35 @@ def get_current_user(
 
 
 # ---------------------------------------------------------------------------
+# Demo-mode gate — single place that blocks writes to the demo org
+# ---------------------------------------------------------------------------
+
+def block_demo_writes(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> CurrentUser:
+    """
+    Raises 403 if DEMO_MODE is on and this user belongs to the demo org.
+
+    Composed into require_analyst / require_admin below, so every endpoint
+    that already requires an analyst or admin role — i.e. every
+    create/update/delete endpoint in the app — is covered automatically.
+    Also usable directly (via WriteUser) for the rare mutating endpoint that
+    only requires AuthUser, e.g. profile self-service actions.
+    """
+    if DEMO_MODE and DEMO_ORG_ID and current_user.org_id == DEMO_ORG_ID:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=DEMO_READONLY_MESSAGE,
+        )
+    return current_user
+
+
+# ---------------------------------------------------------------------------
 # Role-gated dependencies — compose on top of get_current_user
 # ---------------------------------------------------------------------------
 
 def require_admin(
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(block_demo_writes)],
 ) -> CurrentUser:
     """Allows only admin role. Use for user management, org settings."""
     if not current_user.is_admin:
@@ -166,7 +204,7 @@ def require_admin(
 
 
 def require_analyst(
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(block_demo_writes)],
 ) -> CurrentUser:
     """Allows admin and analyst roles. Blocks auditors from write endpoints."""
     if not current_user.can_write:
@@ -184,3 +222,4 @@ def require_analyst(
 AuthUser    = Annotated[CurrentUser, Depends(get_current_user)]
 AdminUser   = Annotated[CurrentUser, Depends(require_admin)]
 AnalystUser = Annotated[CurrentUser, Depends(require_analyst)]
+WriteUser   = Annotated[CurrentUser, Depends(block_demo_writes)]

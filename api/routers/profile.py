@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
-from api.dependencies import AuthUser
+from api.dependencies import WriteUser
 from app.utils.supabase_admin import reset_auth_password
 
 router = APIRouter()
@@ -22,7 +22,7 @@ class ChangePasswordIn(BaseModel):
 
 
 @router.post("/profile/change-password", response_model=dict)
-def change_password(body: ChangePasswordIn, current_user: AuthUser):
+def change_password(body: ChangePasswordIn, current_user: WriteUser):
 
     # 1. Basic validations
     if len(body.new_password) < 10:
