@@ -8,7 +8,7 @@ place.
 ---
 
 ## Live Demo
-Try it now: [soc-readiness-saas-demo.vercel.app](https://soc-readiness-saas-demo.vercel.app)
+Try it now: [soc-readiness-saas-demo.vercel.app](https://soc-readiness-saas-demo.vercel.app/login)
 
 Click "View Demo" on the login page for instant read-only access — no signup required.
 
