@@ -136,12 +136,14 @@ function LoginPageContent() {
             >
               Forgot password?
             </button>
-            <p className="text-center text-sm text-gray-500">
-              Don&apos;t have a workspace?{" "}
-              <Link href="/signup" className="text-indigo-600 hover:underline font-medium">
-                Create one
-              </Link>
-            </p>
+            {!DEMO_ENABLED && (
+              <p className="text-center text-sm text-gray-500">
+                Don&apos;t have a workspace?{" "}
+                <Link href="/signup" className="text-indigo-600 hover:underline font-medium">
+                  Create one
+                </Link>
+              </p>
+            )}
           </div>
         </div>
       </div>

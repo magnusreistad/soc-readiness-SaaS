@@ -53,6 +53,10 @@ DEMO_MODE   = os.getenv("DEMO_MODE", "false").strip().lower() == "true"
 DEMO_ORG_ID = int(os.getenv("DEMO_ORG_ID", "0") or 0)
 
 DEMO_READONLY_MESSAGE = "This is a read-only demo. Sign up to try this with your own data."
+DEMO_SIGNUP_DISABLED_MESSAGE = (
+    "Signups are disabled on this demo. Click 'View Demo' on the login page "
+    "to explore with a read-only account."
+)
 
 logger  = logging.getLogger(__name__)
 _bearer = HTTPBearer(auto_error=True)
@@ -185,6 +189,23 @@ def block_demo_writes(
             detail=DEMO_READONLY_MESSAGE,
         )
     return current_user
+
+
+def block_demo_signup() -> None:
+    """
+    Raises 403 if this deployment has DEMO_MODE enabled.
+
+    Unlike block_demo_writes (which is scoped to the seeded demo org via
+    DEMO_ORG_ID), signup happens before any org/user exists to check —
+    DEMO_MODE alone means "this whole deployment is the public demo," so
+    new-account creation is disabled outright. No-op when DEMO_MODE is
+    false/unset, i.e. real production and local dev are unaffected.
+    """
+    if DEMO_MODE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=DEMO_SIGNUP_DISABLED_MESSAGE,
+        )
 
 
 # ---------------------------------------------------------------------------

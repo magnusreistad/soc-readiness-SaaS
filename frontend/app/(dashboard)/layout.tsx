@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase'
 import { useTheme } from '@/components/ThemeProvider'
+import { api } from '@/lib/api'
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
@@ -414,9 +415,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, [])
 
   useEffect(() => {
-    fetch('/api/incidents?status=new&limit=1')
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d?.total != null) setNewIncidents(Number(d.total)) })
+    api.get('incidents/stats')
+      .then(d => { if (d?.new != null) setNewIncidents(Number(d.new)) })
       .catch(() => {})
   }, [])
 

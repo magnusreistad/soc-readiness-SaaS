@@ -8,9 +8,10 @@ Endpoints:
 """
 
 import re
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 
+from api.dependencies import block_demo_signup
 from app.utils.supabase_admin import create_auth_user
 from app.utils.db_postgres import create_org_with_profile, get_user_by_email
 
@@ -42,6 +43,7 @@ class SignupOut(BaseModel):
     "/auth/signup",
     response_model=SignupOut,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(block_demo_signup)],
 )
 def signup(body: SignupIn):
     """
