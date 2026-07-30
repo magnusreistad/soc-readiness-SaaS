@@ -7,6 +7,16 @@ place.
 
 ---
 
+## Live Demo
+Try it now: [soc-readiness-saas-demo.vercel.app](https://soc-readiness-saas-demo.vercel.app)
+
+Click "View Demo" on the login page for instant read-only access — no signup required.
+
+> Note: the backend may take ~15-30 seconds to wake up on first load if it's 
+> been idle (free-tier hosting). Subsequent requests are fast.
+
+---
+
 ## What this is
 
 Most compliance tooling (Vanta, Drata, and similar) focuses on automated evidence
