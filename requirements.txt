@@ -32,4 +32,4 @@ openpyxl==3.1.5
 reportlab==4.4.10
 
 # Required by PyJWT for ES256/JWKS signature verification (Supabase asymmetric JWT keys)
-cryptography==<version-that-pip-freeze-shows>
+cryptography==49.0.0
