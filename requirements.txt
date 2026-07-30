@@ -2,6 +2,10 @@
 fastapi==0.135.2
 uvicorn==0.42.0
 
+# Required by FastAPI for File/Form (multipart) request parsing — used by
+# the evidence upload endpoints
+python-multipart==0.0.32
+
 # Database
 psycopg2-binary==2.9.11
 
