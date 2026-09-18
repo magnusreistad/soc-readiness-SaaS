@@ -27,6 +27,7 @@ import ControlDrawer from './ControlDrawer'
 import AddControlModal from './AddControlModal'
 import { ControlsFilterbar, ActiveFilters } from './ControlsFilterbar'
 import { TabNavigation, TabNavigationLink } from '@/components/TabNavigation'
+import { DemoBanner } from './DemoBanner'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -337,6 +338,14 @@ function ControlsPageContent() {
           Add control
         </Button>
       </div>
+
+      {/* ── Demo-only callout ── */}
+      <DemoBanner
+        onOpenControl={() => {
+          const match = controls.find(c => c.control_id === 'CC8-001')
+          if (match) setSelectedControl(match)
+        }}
+      />
 
       {/* ── Main table card ── */}
       <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
