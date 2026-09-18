@@ -48,6 +48,11 @@ from app.ai.evidence_evaluator import (
     PHASE_LABELS,
     EvaluationResult,
 )
+from app.collectors.github_collector import (
+    get_branch_protection,
+    list_pull_requests,
+    list_commits,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -491,6 +496,17 @@ class PopulationIpeOut(BaseModel):
     ipe: EvidenceFileOut
 
 
+class GitHubPullRequestBody(BaseModel):
+    owner: str
+    repo: str
+    branch: str = "main"
+    # Optional: required explicitly when the control maps to more than one
+    # TSC criterion, so evidence never gets silently attached to the wrong
+    # one. Falls back to tsc_criteria[0] only when the control has exactly
+    # one criterion.
+    criteria_code: Optional[str] = None
+
+
 @router.post(
     '/controls/{control_id}/evidence/population-ipe',
     response_model=PopulationIpeOut,
@@ -674,6 +690,144 @@ async def upload_population_with_ipe(
             uploaded_at=str(ipe_uploaded_at),
             evaluated_at=str(ipe_uploaded_at),
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/controls/{control_id}/evidence/github-pull
+# Auto-pulls branch protection, pull requests, and commit history from GitHub
+# and evaluates the bundle as walkthrough evidence (design effectiveness —
+# does the repo's configuration show the control is in place?).
+# ---------------------------------------------------------------------------
+
+@router.post(
+    '/controls/{control_id}/evidence/github-pull',
+    response_model=EvidenceFileOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def pull_github_evidence(
+    control_id: int,
+    body: GitHubPullRequestBody,
+    current_user: AnalystUser,
+):
+    """
+    Auto-collects GitHub evidence (branch protection, PRs, commits) for a
+    control and runs it through the same evaluation/persistence path as a
+    manual upload.
+
+    JSON body:
+        owner         : GitHub org/user
+        repo          : Repository name
+        branch        : Branch to check protection on (default 'main')
+        criteria_code : TSC criterion e.g. 'CC8.1'. Required when the control
+                        maps to more than one criterion; otherwise optional
+                        and defaults to the control's sole criterion.
+    """
+    # ── Verify control belongs to org ────────────────────────────────────────
+    control = get_control_by_id(control_id, current_user.org_id)
+    if not control:
+        raise HTTPException(status_code=404, detail='Control not found.')
+
+    # ── Resolve criteria_code ────────────────────────────────────────────────
+    tsc_criteria = control.get('tsc_criteria', '[]')
+    if isinstance(tsc_criteria, str):
+        try:
+            tsc_criteria = json.loads(tsc_criteria)
+        except Exception:
+            tsc_criteria = []
+
+    if body.criteria_code:
+        criteria_code = body.criteria_code.strip().upper()
+        if criteria_code not in _VALID_CRITERIA:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid criteria code '{criteria_code}'.",
+            )
+    elif len(tsc_criteria) == 1:
+        criteria_code = tsc_criteria[0]
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                'This control maps to multiple (or zero) TSC criteria '
+                f'({tsc_criteria}). Specify criteria_code explicitly.'
+            ),
+        )
+
+    # ── Pull evidence from GitHub ────────────────────────────────────────────
+    protection    = await get_branch_protection(body.owner, body.repo, body.branch)
+    pull_requests = await list_pull_requests(body.owner, body.repo)
+    commits       = await list_commits(body.owner, body.repo)
+
+    evidence_payload = {
+        'source': 'github',
+        'owner': body.owner,
+        'repo': body.repo,
+        'branch': body.branch,
+        'branch_protection': protection,
+        'pull_requests': pull_requests,
+        'commits': commits,
+    }
+    extracted_text = json.dumps(evidence_payload, indent=2)
+
+    # ── Run evaluation ───────────────────────────────────────────────────────
+    result: EvaluationResult = evaluate_evidence(
+        raw_text=extracted_text,
+        criteria_code=criteria_code,
+        phase='walkthrough',
+        control_title=control.get('title', ''),
+        control_description=control.get('description', ''),
+        control_type=control.get('control_type', 'manual'),
+        file_type='json',
+        was_truncated=False,
+        sample_reference='Auto-pulled via GitHub API',
+    )
+
+    filename = f'github-{body.owner}-{body.repo}-{body.branch}.json'
+
+    # ── Persist to evidence_files ────────────────────────────────────────────
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO evidence_files (
+                    org_id, control_id, criteria_code, phase,
+                    sample_reference, filename, file_type,
+                    extracted_text, evaluation,
+                    uploaded_by, evaluated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                RETURNING id, uploaded_at
+                """,
+                (
+                    current_user.org_id,
+                    control_id,
+                    criteria_code,
+                    'walkthrough',
+                    'Auto-pulled via GitHub API',
+                    filename,
+                    'json',
+                    extracted_text,
+                    json.dumps(result.to_dict()),
+                    current_user.email,
+                ),
+            )
+            inserted = cur.fetchone()
+            new_id = inserted[0] if isinstance(inserted, tuple) else inserted['id']
+            uploaded_at = inserted[1] if isinstance(inserted, tuple) else inserted['uploaded_at']
+
+    return EvidenceFileOut(
+        id=new_id,
+        control_id=control_id,
+        criteria_code=criteria_code,
+        phase='walkthrough',
+        phase_label=PHASE_LABELS.get('walkthrough', 'walkthrough'),
+        sample_reference='Auto-pulled via GitHub API',
+        filename=filename,
+        file_type='json',
+        evaluation=result.to_dict(),
+        uploaded_by=current_user.email,
+        uploaded_at=str(uploaded_at),
+        evaluated_at=str(uploaded_at),
     )
 
 
