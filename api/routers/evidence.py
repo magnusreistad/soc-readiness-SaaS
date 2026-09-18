@@ -38,7 +38,7 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
-from api.dependencies import AnalystUser, AuthUser
+from api.dependencies import AnalystUser, AnalystUserDemoExempt, AuthUser
 from app.utils.document_processor import extract_text, ALLOWED_MIME_TYPES
 from app.utils.soc_mapper import SOC_LABELS
 from app.utils.db_postgres import get_control_by_id, get_db
@@ -708,7 +708,7 @@ async def upload_population_with_ipe(
 async def pull_github_evidence(
     control_id: int,
     body: GitHubPullRequestBody,
-    current_user: AnalystUser,
+    current_user: AnalystUserDemoExempt,
 ):
     """
     Auto-collects GitHub evidence (branch protection, PRs, commits) for a
@@ -785,35 +785,70 @@ async def pull_github_evidence(
 
     filename = f'github-{body.owner}-{body.repo}-{body.branch}.json'
 
-    # ── Persist to evidence_files ────────────────────────────────────────────
+    # ── Persist to evidence_files (upsert — repeated pulls for the same
+    #    control update the existing row instead of piling up duplicates,
+    #    which matters since this route is click-repeatable on the demo) ────
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO evidence_files (
-                    org_id, control_id, criteria_code, phase,
-                    sample_reference, filename, file_type,
-                    extracted_text, evaluation,
-                    uploaded_by, evaluated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                RETURNING id, uploaded_at
+                SELECT id FROM evidence_files
+                WHERE org_id = %s AND control_id = %s
+                  AND sample_reference = 'Auto-pulled via GitHub API'
                 """,
-                (
-                    current_user.org_id,
-                    control_id,
-                    criteria_code,
-                    'walkthrough',
-                    'Auto-pulled via GitHub API',
-                    filename,
-                    'json',
-                    extracted_text,
-                    json.dumps(result.to_dict()),
-                    current_user.email,
-                ),
+                (current_user.org_id, control_id),
             )
-            inserted = cur.fetchone()
-            new_id = inserted[0] if isinstance(inserted, tuple) else inserted['id']
-            uploaded_at = inserted[1] if isinstance(inserted, tuple) else inserted['uploaded_at']
+            existing = cur.fetchone()
+
+            if existing:
+                existing_id = existing[0] if isinstance(existing, tuple) else existing['id']
+                cur.execute(
+                    """
+                    UPDATE evidence_files
+                    SET criteria_code = %s, filename = %s, file_type = %s,
+                        extracted_text = %s, evaluation = %s,
+                        uploaded_by = %s, evaluated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id, uploaded_at
+                    """,
+                    (
+                        criteria_code,
+                        filename,
+                        'json',
+                        extracted_text,
+                        json.dumps(result.to_dict()),
+                        current_user.email,
+                        existing_id,
+                    ),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO evidence_files (
+                        org_id, control_id, criteria_code, phase,
+                        sample_reference, filename, file_type,
+                        extracted_text, evaluation,
+                        uploaded_by, evaluated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    RETURNING id, uploaded_at
+                    """,
+                    (
+                        current_user.org_id,
+                        control_id,
+                        criteria_code,
+                        'walkthrough',
+                        'Auto-pulled via GitHub API',
+                        filename,
+                        'json',
+                        extracted_text,
+                        json.dumps(result.to_dict()),
+                        current_user.email,
+                    ),
+                )
+
+            row = cur.fetchone()
+            new_id = row[0] if isinstance(row, tuple) else row['id']
+            uploaded_at = row[1] if isinstance(row, tuple) else row['uploaded_at']
 
     return EvidenceFileOut(
         id=new_id,
