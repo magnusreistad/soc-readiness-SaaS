@@ -236,11 +236,33 @@ def require_analyst(
     return current_user
 
 
+def require_analyst_demo_exempt(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> CurrentUser:
+    """
+    Same role gate as require_analyst (admin/analyst only, auditors blocked)
+    but deliberately WITHOUT block_demo_writes.
+
+    Reserved for the one route that is itself the public demo's interactive
+    feature — currently only POST /controls/{id}/evidence/github-pull. Do
+    not reuse this for any other endpoint; every other mutating route must
+    keep going through require_admin/require_analyst/block_demo_writes so
+    the DEMO_MODE guard stays intact everywhere else.
+    """
+    if not current_user.can_write:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Analyst or admin role required.",
+        )
+    return current_user
+
+
 # ---------------------------------------------------------------------------
 # Convenience type aliases for route signatures
 # ---------------------------------------------------------------------------
 
-AuthUser    = Annotated[CurrentUser, Depends(get_current_user)]
-AdminUser   = Annotated[CurrentUser, Depends(require_admin)]
-AnalystUser = Annotated[CurrentUser, Depends(require_analyst)]
-WriteUser   = Annotated[CurrentUser, Depends(block_demo_writes)]
+AuthUser              = Annotated[CurrentUser, Depends(get_current_user)]
+AdminUser             = Annotated[CurrentUser, Depends(require_admin)]
+AnalystUser           = Annotated[CurrentUser, Depends(require_analyst)]
+AnalystUserDemoExempt = Annotated[CurrentUser, Depends(require_analyst_demo_exempt)]
+WriteUser             = Annotated[CurrentUser, Depends(block_demo_writes)]
