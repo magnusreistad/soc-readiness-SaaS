@@ -503,6 +503,67 @@ function UploadZone({
   )
 }
 
+// ─── GitHub evidence auto-pull ───────────────────────────────────────────────
+
+// Mirrors GITHUB_OWNER / GITHUB_REPO in .env.demo, which the backend's
+// github_collector.py reads from. There's no NEXT_PUBLIC_ equivalent exposed
+// to the frontend, so these are pinned here for the one-click demo flow —
+// this repo is the evidence source for the CC8.1 demo control.
+const GITHUB_PULL_CRITERIA = 'CC8.1'
+const GITHUB_OWNER  = 'magnusreistad'
+const GITHUB_REPO   = 'soc-readiness-SaaS'
+const GITHUB_BRANCH = 'main'
+
+function GitHubPullButton({
+  controlId, onPulled,
+}: {
+  controlId: number
+  onPulled: () => void
+}) {
+  const [pulling, setPulling] = useState(false)
+  const [error,   setError]   = useState('')
+
+  async function handlePull() {
+    setError(''); setPulling(true)
+    try {
+      await api.post(`controls/${controlId}/evidence/github-pull`, {
+        owner:         GITHUB_OWNER,
+        repo:          GITHUB_REPO,
+        branch:        GITHUB_BRANCH,
+        criteria_code: GITHUB_PULL_CRITERIA,
+      })
+      onPulled()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'GitHub pull failed')
+    } finally {
+      setPulling(false)
+    }
+  }
+
+  return (
+    <div className="mb-3">
+      <Button
+        variant="secondary"
+        onClick={handlePull}
+        isLoading={pulling}
+        loadingText="Pulling from GitHub…"
+        className="w-full"
+      >
+        Auto-pull evidence from GitHub
+      </Button>
+      {error && (
+        <div className="mt-2 flex items-center gap-1.5 text-xs text-red-600 dark:text-red-400">
+          <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          {error}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Main drawer ─────────────────────────────────────────────────────────────
 
 interface ControlDrawerProps {
@@ -897,6 +958,9 @@ export default function ControlDrawer({ control, defaultPhase, onClose, onRefres
                 <p className="text-xs font-semibold uppercase tracking-wider mb-2 text-gray-400 dark:text-gray-500">
                   {phaseFiles.length > 0 ? 'Add more evidence' : 'Upload evidence'}
                 </p>
+                {activePhase === 'walkthrough' && controlData.tsc_criteria?.includes(GITHUB_PULL_CRITERIA) && (
+                  <GitHubPullButton controlId={controlData.id} onPulled={handleUploaded} />
+                )}
                 <UploadZone
                   controlId={controlData.id}
                   phaseApiKey={phaseCfg.apiKeys[0]}
