@@ -121,7 +121,8 @@ def update_vendor(
     if not row:
         raise HTTPException(status_code=404, detail="Vendor not found.")
 
-    updates = body.model_dump(exclude_none=True)
+    allowed = {"name", "aliases", "category", "active"}
+    updates = {k: v for k, v in body.model_dump(exclude_none=True).items() if k in allowed}
     if not updates:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -139,7 +140,6 @@ def update_vendor(
             values.append(val)
 
     # vendors table has no updated_at column — omit it
-    set_parts = [p for p in set_parts if p]
     values.extend([vendor_id, current_user.org_id])
 
     with get_db() as conn:
