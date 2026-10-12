@@ -381,10 +381,18 @@ def test_normal_multi_sheet_workbook_extracts_every_sheet(monkeypatch):
     texts = ["Q1 access review", "Q2 access review", "Q3 access review"]
     data = _multi_sheet_xlsx(texts)
     load_calls = _spy(monkeypatch, openpyxl, "load_workbook")
+    # Block xlrd so an "excel" result can only have come from openpyxl
+    monkeypatch.setitem(sys.modules, "xlrd", None)
 
     result = dp.extract_text(data, "reviews.xlsx", XLSX_MIME)
 
     assert len(load_calls) == 1
+    # Went through openpyxl, not a fallback: only the spreadsheet parsers emit
+    # sheet markers. file_type alone isn't enough, since the final "could not
+    # extract" result is also "excel".
+    assert result.error is None
+    assert result.file_type == "excel"
+    assert all(f"[Sheet: Sheet{i}]" in result.text for i in range(3))
     assert result.page_count == 3
     assert all(t in result.text for t in texts)
 
