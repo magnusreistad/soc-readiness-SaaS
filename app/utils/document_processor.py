@@ -46,6 +46,7 @@ MAX_EXTRACTED_CHARS = 50_000              # truncate extracted text at 50k chars
 MAX_PAGES_PDF       = 50                  # only process first 50 pages of a PDF
 MAX_ZIP_ENTRIES     = 10_000              # zip-bomb guard for ZIP-based uploads: entry count
 MAX_ZIP_UNCOMPRESSED_BYTES = 100 * 1024 * 1024  # zip-bomb guard: sum of declared entry sizes
+MAX_XLSX_SHEETS     = 200                 # more sheets than this skips openpyxl
 
 ALLOWED_MIME_TYPES = {
     'application/pdf',
@@ -287,7 +288,7 @@ def _extract_excel(file_bytes: bytes, filename: str) -> ExtractionResult:
     zip_allowed = _zip_allowed(file_bytes, filename)
 
     # ── Strategy 1: openpyxl for .xlsx ──────────────────────────────────────
-    if zip_allowed:
+    if zip_allowed and _xlsx_sheets_allowed(file_bytes, filename):
         try:
             import openpyxl
             wb = openpyxl.load_workbook(
@@ -295,14 +296,21 @@ def _extract_excel(file_bytes: bytes, filename: str) -> ExtractionResult:
             )
             parts = []
             sheet_count = 0
+            collected = 0
             for sheet_name in wb.sheetnames:
+                if collected > MAX_EXTRACTED_CHARS:
+                    break    # output is truncated there anyway
                 ws = wb[sheet_name]
                 sheet_count += 1
                 parts.append(f'[Sheet: {sheet_name}]')
+                collected += len(parts[-1]) + 1
                 for row in ws.iter_rows(values_only=True):
                     cells = [str(c) if c is not None else '' for c in row]
                     if any(c.strip() for c in cells):
                         parts.append('\t'.join(cells))
+                        collected += len(parts[-1]) + 1
+                        if collected > MAX_EXTRACTED_CHARS:
+                            break
             wb.close()
 
             raw = '\n'.join(parts)
@@ -354,6 +362,47 @@ def _extract_excel(file_bytes: bytes, filename: str) -> ExtractionResult:
             'Alternatively, export as CSV.'
         ),
     )
+
+
+def _xlsx_sheets_allowed(file_bytes: bytes, filename: str) -> bool:
+    """
+    Pre-check before openpyxl. In read-only mode openpyxl decompresses each
+    sheet's part once inside load_workbook (ReadOnlyWorksheet scans its
+    dimensions) and again on iteration, once per sheet that references it.
+    Sheets aliasing one part therefore multiply decompression past the ZIP
+    caps, so reject that, and workbooks over MAX_XLSX_SHEETS.
+
+    Uses openpyxl's own lookup (workbook part from [Content_Types].xml, sheet
+    targets normalised by get_dependents) so the check sees the same parts
+    load_workbook would open. Reads only the manifest, workbook part and its
+    rels. Fails closed: anything unreadable here openpyxl couldn't load either.
+    """
+    try:
+        from openpyxl.packaging.manifest import Manifest
+        from openpyxl.packaging.relationship import get_dependents, get_rels_path
+        from openpyxl.packaging.workbook import WorkbookPackage
+        from openpyxl.reader.excel import _find_workbook_part
+        from openpyxl.xml.constants import ARC_CONTENT_TYPES
+        from openpyxl.xml.functions import fromstring
+
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            manifest = Manifest.from_tree(fromstring(zf.read(ARC_CONTENT_TYPES)))
+            wb_part = _find_workbook_part(manifest).PartName[1:]
+            sheets = WorkbookPackage.from_tree(fromstring(zf.read(wb_part))).sheets
+            rels = get_dependents(zf, get_rels_path(wb_part)).to_dict()
+            targets = [rels[sheet.id].target for sheet in sheets if sheet.id]
+    except Exception as e:
+        logger.info('Workbook pre-check failed for %s: %s — skipping openpyxl', filename, e)
+        return False
+
+    if len(sheets) > MAX_XLSX_SHEETS:
+        logger.warning('Skipping openpyxl for %s: %d sheets exceeds %d',
+                       filename, len(sheets), MAX_XLSX_SHEETS)
+        return False
+    if len(set(targets)) != len(targets):
+        logger.warning('Skipping openpyxl for %s: multiple sheets point to the same part', filename)
+        return False
+    return True
 
 
 def _extract_csv(file_bytes: bytes) -> ExtractionResult:

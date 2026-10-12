@@ -266,3 +266,146 @@ def test_octet_stream_zip_is_sniffed_into_guarded_path(monkeypatch, docx_bytes, 
     dp.extract_text(docx_bytes, filename, "application/octet-stream")
 
     assert member_opens == []
+
+
+# ---------------------------------------------------------------------------
+# .xlsx sheet aliasing: openpyxl decompresses a sheet's part once per sheet
+# that references it (inside load_workbook and again on iteration)
+# ---------------------------------------------------------------------------
+
+WS_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+
+
+def _workbook_with_sheet_refs(targets: list[str]) -> bytes:
+    """
+    Builds a .xlsx with one <sheet> per entry in targets, each pointing via
+    its own relationship at that target (relative to xl/). Only
+    xl/worksheets/sheet1.xml exists, so repeated targets alias one part.
+    """
+    buf = io.BytesIO()
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = TEXT
+    wb.save(buf)
+    with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as src:
+        files = {n: src.read(n) for n in src.namelist()}
+
+    r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    sheets = "".join(
+        f'<sheet name="S{i}" sheetId="{i + 1}" r:id="rIdAlias{i}"/>' for i in range(len(targets))
+    )
+    wbx = files["xl/workbook.xml"].decode()
+    start, end = wbx.index("<sheets>"), wbx.index("</sheets>") + len("</sheets>")
+    files["xl/workbook.xml"] = (wbx[:start] + f'<sheets xmlns:r="{r_ns}">{sheets}</sheets>' + wbx[end:]).encode()
+
+    rels = "".join(
+        f'<Relationship Id="rIdAlias{i}" Type="{WS_REL_TYPE}" Target="{t}"/>' for i, t in enumerate(targets)
+    )
+    rx = files["xl/_rels/workbook.xml.rels"].decode()
+    files["xl/_rels/workbook.xml.rels"] = rx.replace("</Relationships>", rels + "</Relationships>").encode()
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in files.items():
+            zf.writestr(name, data)
+    return out.getvalue()
+
+
+def _multi_sheet_xlsx(sheet_texts: list[str]) -> bytes:
+    buf = io.BytesIO()
+    wb = openpyxl.Workbook()
+    wb.active.title = "Sheet0"
+    wb.active["A1"] = sheet_texts[0]
+    for i, text in enumerate(sheet_texts[1:], start=1):
+        wb.create_sheet(f"Sheet{i}")["A1"] = text
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@pytest.fixture(scope="module")
+def aliasing_xlsx() -> bytes:
+    return _workbook_with_sheet_refs(["worksheets/sheet1.xml"] * 50)
+
+
+@pytest.fixture
+def worksheet_opens(monkeypatch):
+    """Sheet parts decompressed (ZipFile.read goes through open)."""
+    opens = []
+    real = zipfile.ZipFile.open
+
+    def spy(self, name, *args, **kwargs):
+        member = name if isinstance(name, str) else name.filename
+        if "/worksheets/" in f"/{member}":
+            opens.append(member)
+        return real(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", spy)
+    return opens
+
+
+def test_aliasing_workbook_never_reaches_openpyxl(monkeypatch, aliasing_xlsx, worksheet_opens):
+    load_calls = _spy(monkeypatch, openpyxl, "load_workbook")
+
+    dp.extract_text(aliasing_xlsx, "reviews.xlsx", XLSX_MIME)
+
+    assert load_calls == []
+    assert worksheet_opens == []
+
+
+def test_aliasing_workbook_amplifies_without_precheck(monkeypatch, aliasing_xlsx, worksheet_opens):
+    # Disables the pre-check to show what it prevents: one 50-sheet workbook
+    # decompresses its single sheet part twice per sheet.
+    monkeypatch.setattr(dp, "_xlsx_sheets_allowed", lambda *a: True)
+    load_calls = _spy(monkeypatch, openpyxl, "load_workbook")
+
+    dp.extract_text(aliasing_xlsx, "reviews.xlsx", XLSX_MIME)
+
+    assert len(load_calls) == 1
+    assert len(worksheet_opens) >= 100
+
+
+def test_aliases_spelled_differently_are_still_caught(monkeypatch):
+    # Relative, absolute and ../ spellings all normalise to xl/worksheets/sheet1.xml
+    data = _workbook_with_sheet_refs([
+        "worksheets/sheet1.xml",
+        "/xl/worksheets/sheet1.xml",
+        "worksheets/../worksheets/sheet1.xml",
+    ])
+    load_calls = _spy(monkeypatch, openpyxl, "load_workbook")
+
+    dp.extract_text(data, "reviews.xlsx", XLSX_MIME)
+
+    assert load_calls == []
+
+
+def test_normal_multi_sheet_workbook_extracts_every_sheet(monkeypatch):
+    texts = ["Q1 access review", "Q2 access review", "Q3 access review"]
+    data = _multi_sheet_xlsx(texts)
+    load_calls = _spy(monkeypatch, openpyxl, "load_workbook")
+
+    result = dp.extract_text(data, "reviews.xlsx", XLSX_MIME)
+
+    assert len(load_calls) == 1
+    assert result.page_count == 3
+    assert all(t in result.text for t in texts)
+
+
+def test_workbook_over_sheet_cap_goes_to_fallback(monkeypatch):
+    data = _multi_sheet_xlsx(["a", "b", "c"])
+    monkeypatch.setattr(dp, "MAX_XLSX_SHEETS", 2)
+    load_calls = _spy(monkeypatch, openpyxl, "load_workbook")
+
+    result = dp.extract_text(data, "reviews.xlsx", XLSX_MIME)
+
+    assert load_calls == []
+    assert result.page_count != 3
+
+
+def test_sheet_loop_stops_once_text_passes_cap(monkeypatch):
+    data = _multi_sheet_xlsx(["x" * 100, "second sheet", "third sheet"])
+    monkeypatch.setattr(dp, "MAX_EXTRACTED_CHARS", 50)
+
+    result = dp.extract_text(data, "reviews.xlsx", XLSX_MIME)
+
+    assert result.was_truncated
+    assert result.page_count == 1          # later sheets never iterated
+    assert "second sheet" not in result.text
