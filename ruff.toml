@@ -1,0 +1,23 @@
+target-version = "py311"
+extend-exclude = ["venv", "frontend", "vendor_threat_monitor.egg-info"]
+
+[lint]
+# Ruff defaults (E4, E7, E9, F) apply to all code.
+#
+# E402: several modules call load_dotenv() before importing modules that read
+# env vars at import time (e.g. api/main.py). That ordering is deliberate.
+ignore = ["E402"]
+
+[lint.per-file-ignores]
+# Baseline of findings that existed when CI was introduced. New files get the
+# full rule set; remove entries here as the underlying code is cleaned up.
+"api/dependencies.py"          = ["F401"]
+"api/routers/admin.py"         = ["F401"]
+"api/routers/auth.py"          = ["F401"]
+"api/routers/vendors.py"       = ["F401"]
+"api/routers/evidence.py"      = ["F811"]
+"app/ai/severity_scorer.py"    = ["F401"]
+"app/collectors/cve_collector.py" = ["F841"]
+"app/utils/document_processor.py" = ["F841"]
+"app/utils/fp_learner.py"      = ["F841"]
+"scripts/*"                    = ["F401", "F541", "E701"]
