@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024   # 20 MB hard limit
 MAX_EXTRACTED_CHARS = 50_000              # truncate extracted text at 50k chars
 MAX_PAGES_PDF       = 50                  # only process first 50 pages of a PDF
-MAX_DOCX_XML_BYTES  = 50 * 1024 * 1024   # decompressed word/document.xml cap (zip-bomb guard)
+MAX_ZIP_ENTRIES     = 10_000              # zip-bomb guard for .docx: entry count
+MAX_ZIP_UNCOMPRESSED_BYTES = 100 * 1024 * 1024  # zip-bomb guard: sum of declared entry sizes
 
 ALLOWED_MIME_TYPES = {
     'application/pdf',
@@ -351,6 +352,34 @@ def _extract_csv(file_bytes: bytes) -> ExtractionResult:
     )
 
 
+def _zip_within_limits(file_bytes: bytes, filename: str) -> bool:
+    """
+    Checks a ZIP upload against the entry-count and total-size caps before
+    python-docx or the direct ZIP/XML path decompress anything.
+
+    file_size is the declared uncompressed size. zipfile never reads past it
+    (a lying header fails the CRC check instead), and python-docx reads every
+    part through zipfile.ZipFile.read, so the declared sizes bound what both
+    strategies can decompress.
+    """
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            infos = zf.infolist()
+    except Exception as e:
+        # Unreadable ZIP — both ZIP-based strategies would fail on it anyway
+        logger.info('Could not open %s as a ZIP: %s', filename, e)
+        return False
+
+    total = sum(info.file_size for info in infos)
+    if len(infos) > MAX_ZIP_ENTRIES or total > MAX_ZIP_UNCOMPRESSED_BYTES:
+        logger.warning('Skipping ZIP-based extraction for %s: %d entries, %d bytes uncompressed '
+                       '(limits %d entries, %d bytes)',
+                       filename, len(infos), total, MAX_ZIP_ENTRIES, MAX_ZIP_UNCOMPRESSED_BYTES)
+        return False
+    return True
+
+
 def _extract_word(file_bytes: bytes, filename: str) -> ExtractionResult:
     """
     Layered Word extraction:
@@ -360,31 +389,37 @@ def _extract_word(file_bytes: bytes, filename: str) -> ExtractionResult:
       3. RTF parser    — files that are actually RTF
       4. Binary text   — printable ASCII extraction from any binary as last resort
     """
+    # Both ZIP-based strategies decompress the archive, so check it first.
+    # Over the limits, go straight to the non-ZIP fallbacks (RTF / binary).
+    is_zip = file_bytes[:2] == b'PK'    # ZIP magic bytes
+    zip_allowed = not is_zip or _zip_within_limits(file_bytes, filename)
+
     # ── Strategy 1: python-docx (standard .docx) ────────────────────────────
-    try:
-        from docx import Document
-        doc = Document(io.BytesIO(file_bytes))
-        parts = [para.text for para in doc.paragraphs if para.text.strip()]
-        for table in doc.tables:
-            for row in table.rows:
-                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                if cells:
-                    parts.append('\t'.join(cells))
-        raw = '\n'.join(parts)
-        if raw.strip():
-            text, truncated = _truncate(raw)
+    if zip_allowed:
+        try:
+            from docx import Document
+            doc = Document(io.BytesIO(file_bytes))
+            parts = [para.text for para in doc.paragraphs if para.text.strip()]
+            for table in doc.tables:
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                    if cells:
+                        parts.append('\t'.join(cells))
+            raw = '\n'.join(parts)
+            if raw.strip():
+                text, truncated = _truncate(raw)
+                return ExtractionResult(
+                    text=text, file_type='word', page_count=None,
+                    char_count=len(text), was_truncated=truncated,
+                )
+        except ImportError:
             return ExtractionResult(
-                text=text, file_type='word', page_count=None,
-                char_count=len(text), was_truncated=truncated,
+                text='', file_type='word', page_count=None, char_count=0,
+                was_truncated=False,
+                error='Word processing requires python-docx: pip install python-docx',
             )
-    except ImportError:
-        return ExtractionResult(
-            text='', file_type='word', page_count=None, char_count=0,
-            was_truncated=False,
-            error='Word processing requires python-docx: pip install python-docx',
-        )
-    except Exception as e:
-        logger.info('python-docx failed for %s: %s — trying direct ZIP extraction', filename, e)
+        except Exception as e:
+            logger.info('python-docx failed for %s: %s — trying direct ZIP extraction', filename, e)
 
     # ── Strategy 2: Direct ZIP + XML extraction ──────────────────────────────
     # Handles the exact '[Content_Types].xml' error — python-docx requires this
@@ -392,7 +427,7 @@ def _extract_word(file_bytes: bytes, filename: str) -> ExtractionResult:
     # can read it directly with zipfile without caring about the manifest.
     # Triggered by: Pages exports, LibreOffice-created files, repacked .docx,
     # or any OOXML ZIP that's missing its content type declarations.
-    if file_bytes[:2] == b'PK':    # ZIP magic bytes
+    if is_zip and zip_allowed:
         try:
             import zipfile
             from defusedxml import ElementTree as ET
@@ -411,13 +446,6 @@ def _extract_word(file_bytes: bytes, filename: str) -> ExtractionResult:
                         (n for n in names if n.lower().endswith('document.xml')),
                         None,
                     )
-
-                # file_size is the declared uncompressed size; zipfile stops
-                # reading there (and fails the CRC check), so it bounds memory.
-                if doc_xml_name and zf.getinfo(doc_xml_name).file_size > MAX_DOCX_XML_BYTES:
-                    logger.warning('Skipping ZIP/XML extraction for %s: %s exceeds %d bytes uncompressed',
-                                   filename, doc_xml_name, MAX_DOCX_XML_BYTES)
-                    doc_xml_name = None
 
                 if doc_xml_name:
                     xml_bytes = zf.read(doc_xml_name)
