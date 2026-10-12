@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024   # 20 MB hard limit
 MAX_EXTRACTED_CHARS = 50_000              # truncate extracted text at 50k chars
 MAX_PAGES_PDF       = 50                  # only process first 50 pages of a PDF
+MAX_DOCX_XML_BYTES  = 50 * 1024 * 1024   # decompressed word/document.xml cap (zip-bomb guard)
 
 ALLOWED_MIME_TYPES = {
     'application/pdf',
@@ -394,7 +395,7 @@ def _extract_word(file_bytes: bytes, filename: str) -> ExtractionResult:
     if file_bytes[:2] == b'PK':    # ZIP magic bytes
         try:
             import zipfile
-            from xml.etree import ElementTree as ET
+            from defusedxml import ElementTree as ET
 
             with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
                 names = zf.namelist()
@@ -410,6 +411,13 @@ def _extract_word(file_bytes: bytes, filename: str) -> ExtractionResult:
                         (n for n in names if n.lower().endswith('document.xml')),
                         None,
                     )
+
+                # file_size is the declared uncompressed size; zipfile stops
+                # reading there (and fails the CRC check), so it bounds memory.
+                if doc_xml_name and zf.getinfo(doc_xml_name).file_size > MAX_DOCX_XML_BYTES:
+                    logger.warning('Skipping ZIP/XML extraction for %s: %s exceeds %d bytes uncompressed',
+                                   filename, doc_xml_name, MAX_DOCX_XML_BYTES)
+                    doc_xml_name = None
 
                 if doc_xml_name:
                     xml_bytes = zf.read(doc_xml_name)
