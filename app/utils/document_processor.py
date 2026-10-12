@@ -72,6 +72,7 @@ ALLOWED_MIME_TYPES = {
 }
 
 FileType = Literal['pdf', 'image', 'excel', 'word', 'csv', 'text']
+ZipStatus = Literal['within_limits', 'over_limits', 'unreadable']
 
 
 @dataclass
@@ -237,14 +238,20 @@ def _extract_pdf(file_bytes: bytes, filename: str) -> ExtractionResult:
             error='PDF processing requires PyMuPDF: pip install pymupdf',
         )
 
-    # MuPDF picks the format from the content, not filetype=, so ZIP bytes
-    # sent as application/pdf are opened as EPUB/CBZ/XPS and decompressed.
-    if not _zip_allowed(file_bytes, filename):
-        return ExtractionResult(
-            text='', file_type='pdf', page_count=None, char_count=0,
-            was_truncated=False,
-            error='Could not extract text from this PDF: the file is a compressed archive that exceeds size limits.',
-        )
+    # MuPDF picks the format from the content (filetype='pdf' doesn't force
+    # it), so ZIP bytes sent as application/pdf are opened as EPUB/CBZ/XPS
+    # and decompressed. A %PDF- header in the first 1024 bytes always sends
+    # it to the PDF parser (it scans further than that), so those files skip
+    # the ZIP check. For anything else, also reject ZIPs zipfile can't read:
+    # MuPDF uses its own ZIP reader, which may still open them.
+    if b'%PDF-' not in file_bytes[:1024] and zipfile.is_zipfile(io.BytesIO(file_bytes)):
+        if _zip_limits_status(file_bytes, filename) != 'within_limits':
+            return ExtractionResult(
+                text='', file_type='pdf', page_count=None, char_count=0,
+                was_truncated=False,
+                error='Could not extract text from this PDF: the file is a compressed '
+                      'archive that exceeds size limits or could not be read.',
+            )
 
     doc = fitz.open(stream=file_bytes, filetype='pdf')
     pages_to_read = min(len(doc), MAX_PAGES_PDF)
@@ -417,10 +424,13 @@ def _extract_csv(file_bytes: bytes) -> ExtractionResult:
     )
 
 
-def _zip_within_limits(file_bytes: bytes, filename: str) -> bool:
+def _zip_limits_status(file_bytes: bytes, filename: str) -> ZipStatus:
     """
     Checks a ZIP upload against the entry-count and total-size caps before
-    any parser decompresses it.
+    any parser decompresses it. 'unreadable' means zipfile.ZipFile() can't
+    open it, e.g. a PDF or .xls with a stray end-of-central-directory
+    signature that zipfile.is_zipfile accepts; each caller decides what
+    that means for its parser.
 
     file_size is the declared uncompressed size. zipfile never reads past it
     (a lying header fails the CRC check instead); python-docx and openpyxl
@@ -432,28 +442,32 @@ def _zip_within_limits(file_bytes: bytes, filename: str) -> bool:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
             infos = zf.infolist()
     except Exception as e:
-        # Unreadable ZIP — both ZIP-based strategies would fail on it anyway
         logger.info('Could not open %s as a ZIP: %s', filename, e)
-        return False
+        return 'unreadable'
 
     total = sum(info.file_size for info in infos)
     if len(infos) > MAX_ZIP_ENTRIES or total > MAX_ZIP_UNCOMPRESSED_BYTES:
         logger.warning('Skipping ZIP-based extraction for %s: %d entries, %d bytes uncompressed '
                        '(limits %d entries, %d bytes)',
                        filename, len(infos), total, MAX_ZIP_ENTRIES, MAX_ZIP_UNCOMPRESSED_BYTES)
-        return False
-    return True
+        return 'over_limits'
+    return 'within_limits'
 
 
 def _zip_allowed(file_bytes: bytes, filename: str) -> bool:
     """
-    True unless file_bytes is a ZIP archive over the limits. Detection uses
-    zipfile.is_zipfile rather than the PK magic bytes: zipfile (and so
-    python-docx and openpyxl) also opens archives with data prepended.
+    For parsers that only reach ZIP data through Python's zipfile
+    (python-docx, openpyxl, xlrd): True unless file_bytes is a ZIP archive
+    over the limits. 'unreadable' is allowed, since a ZIP that ZipFile()
+    can't open can't be decompressed by them either, and rejecting it would
+    turn away e.g. a legacy .xls with a stray EOCD signature.
+
+    Detection uses zipfile.is_zipfile rather than the PK magic bytes:
+    zipfile also opens archives with data prepended.
     """
     if not zipfile.is_zipfile(io.BytesIO(file_bytes)):
         return True
-    return _zip_within_limits(file_bytes, filename)
+    return _zip_limits_status(file_bytes, filename) != 'over_limits'
 
 
 def _extract_word(file_bytes: bytes, filename: str) -> ExtractionResult:
@@ -468,7 +482,7 @@ def _extract_word(file_bytes: bytes, filename: str) -> ExtractionResult:
     # Both ZIP-based strategies decompress the archive, so check it first.
     # Over the limits, go straight to the non-ZIP fallbacks (RTF / binary).
     is_zip = zipfile.is_zipfile(io.BytesIO(file_bytes))
-    zip_allowed = not is_zip or _zip_within_limits(file_bytes, filename)
+    zip_allowed = _zip_allowed(file_bytes, filename)
 
     # ── Strategy 1: python-docx (standard .docx) ────────────────────────────
     if zip_allowed:

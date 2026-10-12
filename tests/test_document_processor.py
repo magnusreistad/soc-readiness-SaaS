@@ -8,6 +8,7 @@ generated.
 """
 
 import io
+import struct
 import sys
 import types
 import zipfile
@@ -417,3 +418,129 @@ def test_sheet_loop_stops_once_text_passes_cap(monkeypatch):
     assert result.was_truncated
     assert result.page_count == 1          # later sheets never iterated
     assert "second sheet" not in result.text
+
+
+# ---------------------------------------------------------------------------
+# Files zipfile.is_zipfile accepts but zipfile.ZipFile() can't open
+# ---------------------------------------------------------------------------
+
+OLE2_MAGIC = bytes.fromhex("d0cf11e0a1b11ae1")
+EPUB_CONTAINER = (
+    '<?xml version="1.0"?><container version="1.0" '
+    'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+    '<rootfile full-path="c.opf" media-type="application/oebps-package+xml"/>'
+    "</rootfiles></container>"
+)
+EPUB_OPF = (
+    '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0">'
+    '<manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest>'
+    '<spine><itemref idref="a"/></spine></package>'
+)
+EPUB_TEXT = "EPUBCHAPTERTEXT"
+
+
+def _stray_eocd() -> bytes:
+    """
+    An end-of-central-directory record whose central directory "starts" at
+    offset 0. is_zipfile accepts the file; ZipFile() fails on the bad
+    central-directory magic there.
+    """
+    return b"PK\x05\x06" + struct.pack("<HHHHIIH", 0, 0, 1, 1, 46, 0, 0)
+
+
+def _assert_is_zipfile_but_unreadable(data: bytes) -> None:
+    assert zipfile.is_zipfile(io.BytesIO(data))
+    with pytest.raises(zipfile.BadZipFile):
+        zipfile.ZipFile(io.BytesIO(data))
+
+
+def _epub(extra_stored_entry: bytes | None = None) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        if extra_stored_entry is not None:
+            zf.writestr("note.txt", extra_stored_entry, compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", EPUB_CONTAINER, compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("c.opf", EPUB_OPF, compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr(
+            "a.xhtml",
+            f'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>{EPUB_TEXT}</p></body></html>',
+            compress_type=zipfile.ZIP_DEFLATED,
+        )
+    return buf.getvalue()
+
+
+def test_pdf_with_stray_eocd_extracts_normally(monkeypatch, pdf_bytes):
+    data = pdf_bytes + _stray_eocd()
+    _assert_is_zipfile_but_unreadable(data)
+    open_calls = _spy(monkeypatch, fitz, "open")
+
+    result = dp.extract_text(data, "report.pdf", "application/pdf")
+
+    assert len(open_calls) == 1
+    assert result.error is None
+    assert TEXT in result.text
+
+
+def test_legacy_xls_with_stray_eocd_reaches_xlrd(monkeypatch):
+    data = OLE2_MAGIC + b"\x00" * 504 + _stray_eocd()
+    _assert_is_zipfile_but_unreadable(data)
+    xlrd_calls = []
+    sheet = types.SimpleNamespace(name="Legacy", nrows=1, ncols=1, cell_value=lambda r, c: TEXT)
+    fake_xlrd = types.ModuleType("xlrd")
+    fake_xlrd.open_workbook = lambda **kw: xlrd_calls.append(kw) or types.SimpleNamespace(
+        sheets=lambda: [sheet], nsheets=1,
+    )
+    monkeypatch.setitem(sys.modules, "xlrd", fake_xlrd)
+
+    result = dp.extract_text(data, "legacy.xls", "application/vnd.ms-excel")
+
+    assert len(xlrd_calls) == 1
+    assert result.error is None
+    assert "[Sheet: Legacy]" in result.text and TEXT in result.text
+
+
+def test_unreadable_zip_without_pdf_header_never_reaches_pymupdf(monkeypatch):
+    # No %PDF- header, so MuPDF would sniff it with its own ZIP reader
+    data = b"NOTAPDF" + b"\x00" * 64 + _stray_eocd()
+    _assert_is_zipfile_but_unreadable(data)
+    open_calls = _spy(monkeypatch, fitz, "open")
+
+    result = dp.extract_text(data, "report.pdf", "application/pdf")
+
+    assert open_calls == []
+    assert result.error
+
+
+@pytest.mark.parametrize("data_fn", [
+    lambda: b"%PDF-1.4\n" + _epub(),                   # header before the archive
+    lambda: _epub(extra_stored_entry=b"%PDF-1.4"),     # header inside a stored entry
+    lambda: b"J" * 1000 + b"%PDF-1.4\n" + _epub(),     # header near the end of the window
+], ids=["prefix", "stored-entry", "offset-1000"])
+def test_zip_with_pdf_header_is_never_opened_as_epub(monkeypatch, data_fn):
+    # These skip the ZIP check (even over the caps), relying on MuPDF always
+    # choosing its PDF parser when %PDF- is in the first 1024 bytes. Pins that
+    # MuPDF behaviour so an upgrade that changes it fails here.
+    data = data_fn()
+    assert b"%PDF-" in data[:1024] and zipfile.is_zipfile(io.BytesIO(data))
+    monkeypatch.setattr(dp, "MAX_ZIP_UNCOMPRESSED_BYTES", 0)
+
+    result = dp.extract_text(data, "report.pdf", "application/pdf")
+
+    assert EPUB_TEXT not in result.text
+    with pytest.raises(Exception):
+        fitz.open(stream=data, filetype="pdf")     # PDF parser chosen, and fails
+
+
+def test_epub_without_pdf_header_is_sniffed_by_mupdf(monkeypatch):
+    # Why the ZIP check stays on the PDF path: filetype="pdf" doesn't force
+    # the PDF parser, MuPDF opens the EPUB. Over the caps, it's never reached.
+    data = _epub()
+    assert fitz.open(stream=data, filetype="pdf").metadata["format"] == "EPUB"
+    _cap_below(monkeypatch, data)
+    open_calls = _spy(monkeypatch, fitz, "open")
+
+    result = dp.extract_text(data, "report.pdf", "application/pdf")
+
+    assert open_calls == []
+    assert EPUB_TEXT not in result.text
