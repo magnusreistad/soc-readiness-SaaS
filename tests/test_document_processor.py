@@ -532,15 +532,75 @@ def test_zip_with_pdf_header_is_never_opened_as_epub(monkeypatch, data_fn):
         fitz.open(stream=data, filetype="pdf")     # PDF parser chosen, and fails
 
 
-def test_epub_without_pdf_header_is_sniffed_by_mupdf(monkeypatch):
-    # Why the ZIP check stays on the PDF path: filetype="pdf" doesn't force
-    # the PDF parser, MuPDF opens the EPUB. Over the caps, it's never reached.
-    data = _epub()
-    assert fitz.open(stream=data, filetype="pdf").metadata["format"] == "EPUB"
-    _cap_below(monkeypatch, data)
+PNG_1PX = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+)
+XPS_NS = "http://schemas.microsoft.com/xps/2005/06"
+
+
+def _zip(entries: list[tuple[str, str | bytes]]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries:
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def _cbz() -> bytes:
+    return _zip([("001.png", PNG_1PX)])
+
+
+def _xps() -> bytes:
+    return _zip([
+        ("_rels/.rels",
+         '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+         '<Relationship Id="r1" Type="http://schemas.microsoft.com/xps/2005/06/fixedrepresentation" '
+         'Target="/FixedDocSeq.fdseq"/></Relationships>'),
+        ("[Content_Types].xml",
+         '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+         '<Default Extension="fdseq" ContentType="application/vnd.ms-package.xps-fixeddocumentsequence+xml"/>'
+         '<Default Extension="fdoc" ContentType="application/vnd.ms-package.xps-fixeddocument+xml"/>'
+         '<Default Extension="fpage" ContentType="application/vnd.ms-package.xps-fixedpage+xml"/>'
+         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/></Types>'),
+        ("FixedDocSeq.fdseq", f'<FixedDocumentSequence xmlns="{XPS_NS}"><DocumentReference Source="/Doc.fdoc"/></FixedDocumentSequence>'),
+        ("Doc.fdoc", f'<FixedDocument xmlns="{XPS_NS}"><PageContent Source="/P1.fpage"/></FixedDocument>'),
+        ("P1.fpage", f'<FixedPage xmlns="{XPS_NS}" Width="816" Height="1056" xml:lang="en"></FixedPage>'),
+    ])
+
+
+ZIP_DOCUMENT_BUILDERS = {"EPUB": _epub, "CBZ": _cbz, "XPS": _xps}
+MUPDF_FORMAT = {"EPUB": "EPUB", "CBZ": "zip", "XPS": "XPS"}
+
+
+@pytest.mark.parametrize("kind", ZIP_DOCUMENT_BUILDERS)
+def test_zip_bytes_sent_as_pdf_never_open_as_epub_cbz_xps(monkeypatch, kind):
+    # Within the default ZIP caps, so the size check alone wouldn't stop it
+    data = ZIP_DOCUMENT_BUILDERS[kind]()
+    assert dp._zip_limits_status(data, "x") == "within_limits"
+    # MuPDF would open it as that format: filetype="pdf" doesn't force PDF
+    assert fitz.open(stream=data, filetype="pdf").metadata["format"] == MUPDF_FORMAT[kind]
     open_calls = _spy(monkeypatch, fitz, "open")
 
     result = dp.extract_text(data, "report.pdf", "application/pdf")
 
     assert open_calls == []
-    assert EPUB_TEXT not in result.text
+    assert result.text == ""
+    assert result.error
+
+
+@pytest.mark.parametrize("kind", ZIP_DOCUMENT_BUILDERS)
+@pytest.mark.parametrize("mangle", [
+    lambda d: d[:d.rfind(b"PK\x05\x06")],     # end-of-central-directory stripped
+    lambda d: d + b"\x00" * 70_000,           # EOCD pushed out of is_zipfile's search window
+], ids=["eocd-stripped", "trailing-junk"])
+def test_zips_is_zipfile_misses_are_rejected_by_mupdf(kind, mangle):
+    # These pass the is_zipfile gate and reach MuPDF; pins that its own ZIP
+    # reader can't open them either, so the gate has no gap here.
+    data = mangle(ZIP_DOCUMENT_BUILDERS[kind]())
+    assert not zipfile.is_zipfile(io.BytesIO(data))
+
+    result = dp.extract_text(data, "report.pdf", "application/pdf")
+
+    assert result.text == ""
+    assert result.error

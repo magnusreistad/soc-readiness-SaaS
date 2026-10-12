@@ -239,19 +239,18 @@ def _extract_pdf(file_bytes: bytes, filename: str) -> ExtractionResult:
         )
 
     # MuPDF picks the format from the content (filetype='pdf' doesn't force
-    # it), so ZIP bytes sent as application/pdf are opened as EPUB/CBZ/XPS
-    # and decompressed. A %PDF- header in the first 1024 bytes always sends
-    # it to the PDF parser (it scans further than that), so those files skip
-    # the ZIP check. For anything else, also reject ZIPs zipfile can't read:
-    # MuPDF uses its own ZIP reader, which may still open them.
+    # it), so ZIP bytes sent as application/pdf would open as EPUB/CBZ/XPS
+    # and be decompressed by MuPDF's own ZIP reader. A %PDF- header in the
+    # first 1024 bytes always sends it to the PDF parser (it scans further
+    # than that). Without one, a ZIP is never a PDF upload: reject it,
+    # whatever its size or whether zipfile can read it.
     if b'%PDF-' not in file_bytes[:1024] and zipfile.is_zipfile(io.BytesIO(file_bytes)):
-        if _zip_limits_status(file_bytes, filename) != 'within_limits':
-            return ExtractionResult(
-                text='', file_type='pdf', page_count=None, char_count=0,
-                was_truncated=False,
-                error='Could not extract text from this PDF: the file is a compressed '
-                      'archive that exceeds size limits or could not be read.',
-            )
+        logger.warning('Rejecting %s: ZIP archive without a PDF header sent as PDF', filename)
+        return ExtractionResult(
+            text='', file_type='pdf', page_count=None, char_count=0,
+            was_truncated=False,
+            error='Could not extract text from this PDF: the file is a compressed archive, not a PDF.',
+        )
 
     doc = fitz.open(stream=file_bytes, filetype='pdf')
     pages_to_read = min(len(doc), MAX_PAGES_PDF)
