@@ -51,8 +51,11 @@ async function handler(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  // Re-encode the (already validated, decoded) segments so a "?" or "#"
+  // inside one stays a path character instead of starting a query/fragment.
+  const encodedPath = path.map(encodeURIComponent).join('/')
   const search = request.nextUrl.search
-  const url = `${FASTAPI_URL}/api/${targetPath}${search}`
+  const url = `${FASTAPI_URL}/api/${encodedPath}${search}`
   if (new URL(url).origin !== new URL(FASTAPI_URL).origin) {
     return NextResponse.json({ error: 'Invalid path' }, { status: 400 })
   }
