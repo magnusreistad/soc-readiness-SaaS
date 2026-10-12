@@ -31,6 +31,7 @@ import csv
 import io
 import logging
 import re
+import zipfile
 from dataclasses import dataclass
 from typing import Literal
 
@@ -43,6 +44,9 @@ logger = logging.getLogger(__name__)
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024   # 20 MB hard limit
 MAX_EXTRACTED_CHARS = 50_000              # truncate extracted text at 50k chars
 MAX_PAGES_PDF       = 50                  # only process first 50 pages of a PDF
+MAX_ZIP_ENTRIES     = 10_000              # zip-bomb guard for ZIP-based uploads: entry count
+MAX_ZIP_UNCOMPRESSED_BYTES = 100 * 1024 * 1024  # zip-bomb guard: sum of declared entry sizes
+MAX_XLSX_SHEETS     = 200                 # more sheets than this skips openpyxl
 
 ALLOWED_MIME_TYPES = {
     'application/pdf',
@@ -68,6 +72,7 @@ ALLOWED_MIME_TYPES = {
 }
 
 FileType = Literal['pdf', 'image', 'excel', 'word', 'csv', 'text']
+ZipStatus = Literal['within_limits', 'over_limits', 'unreadable']
 
 
 @dataclass
@@ -122,7 +127,7 @@ def extract_text(
 
     try:
         if effective_mime == 'application/pdf':
-            return _extract_pdf(file_bytes)
+            return _extract_pdf(file_bytes, filename)
 
         elif effective_mime in ('image/png', 'image/jpeg', 'image/webp', 'image/gif'):
             return _extract_image(file_bytes, effective_mime)
@@ -223,7 +228,7 @@ def _truncate(text: str) -> tuple[str, bool]:
     return text[:MAX_EXTRACTED_CHARS], True
 
 
-def _extract_pdf(file_bytes: bytes) -> ExtractionResult:
+def _extract_pdf(file_bytes: bytes, filename: str) -> ExtractionResult:
     try:
         import fitz
     except ImportError:
@@ -231,6 +236,20 @@ def _extract_pdf(file_bytes: bytes) -> ExtractionResult:
             text='', file_type='pdf', page_count=None, char_count=0,
             was_truncated=False,
             error='PDF processing requires PyMuPDF: pip install pymupdf',
+        )
+
+    # MuPDF picks the format from the content (filetype='pdf' doesn't force
+    # it), so ZIP bytes sent as application/pdf would open as EPUB/CBZ/XPS
+    # and be decompressed by MuPDF's own ZIP reader. A %PDF- header in the
+    # first 1024 bytes always sends it to the PDF parser (it scans further
+    # than that). Without one, a ZIP is never a PDF upload: reject it,
+    # whatever its size or whether zipfile can read it.
+    if b'%PDF-' not in file_bytes[:1024] and zipfile.is_zipfile(io.BytesIO(file_bytes)):
+        logger.warning('Rejecting %s: ZIP archive without a PDF header sent as PDF', filename)
+        return ExtractionResult(
+            text='', file_type='pdf', page_count=None, char_count=0,
+            was_truncated=False,
+            error='Could not extract text from this PDF: the file is a compressed archive, not a PDF.',
         )
 
     doc = fitz.open(stream=file_bytes, filetype='pdf')
@@ -270,56 +289,69 @@ def _extract_excel(file_bytes: bytes, filename: str) -> ExtractionResult:
       2. xlrd      — old .xls binary (if installed)
       3. CSV       — last resort if the bytes look like text
     """
-    # ── Strategy 1: openpyxl for .xlsx ──────────────────────────────────────
-    try:
-        import openpyxl
-        wb = openpyxl.load_workbook(
-            io.BytesIO(file_bytes), read_only=True, data_only=True,
-        )
-        parts = []
-        sheet_count = 0
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            sheet_count += 1
-            parts.append(f'[Sheet: {sheet_name}]')
-            for row in ws.iter_rows(values_only=True):
-                cells = [str(c) if c is not None else '' for c in row]
-                if any(c.strip() for c in cells):
-                    parts.append('\t'.join(cells))
-        wb.close()
+    # openpyxl (and xlrd < 2.0) decompress ZIP archives, so check first.
+    # Over the limits, go straight to the CSV fallback.
+    zip_allowed = _zip_allowed(file_bytes, filename)
 
-        raw = '\n'.join(parts)
-        if raw.strip():
-            text, truncated = _truncate(raw)
-            return ExtractionResult(
-                text=text, file_type='excel', page_count=sheet_count,
-                char_count=len(text), was_truncated=truncated,
+    # ── Strategy 1: openpyxl for .xlsx ──────────────────────────────────────
+    if zip_allowed and _xlsx_sheets_allowed(file_bytes, filename):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(
+                io.BytesIO(file_bytes), read_only=True, data_only=True,
             )
-    except Exception as e:
-        logger.info('openpyxl failed for %s: %s — trying xlrd', filename, e)
+            parts = []
+            sheet_count = 0
+            collected = 0
+            for sheet_name in wb.sheetnames:
+                if collected > MAX_EXTRACTED_CHARS:
+                    break    # output is truncated there anyway
+                ws = wb[sheet_name]
+                sheet_count += 1
+                parts.append(f'[Sheet: {sheet_name}]')
+                collected += len(parts[-1]) + 1
+                for row in ws.iter_rows(values_only=True):
+                    cells = [str(c) if c is not None else '' for c in row]
+                    if any(c.strip() for c in cells):
+                        parts.append('\t'.join(cells))
+                        collected += len(parts[-1]) + 1
+                        if collected > MAX_EXTRACTED_CHARS:
+                            break
+            wb.close()
+
+            raw = '\n'.join(parts)
+            if raw.strip():
+                text, truncated = _truncate(raw)
+                return ExtractionResult(
+                    text=text, file_type='excel', page_count=sheet_count,
+                    char_count=len(text), was_truncated=truncated,
+                )
+        except Exception as e:
+            logger.info('openpyxl failed for %s: %s — trying xlrd', filename, e)
 
     # ── Strategy 2: xlrd for old .xls ────────────────────────────────────────
-    try:
-        import xlrd  # type: ignore
-        wb = xlrd.open_workbook(file_contents=file_bytes)
-        parts = []
-        for sheet in wb.sheets():
-            parts.append(f'[Sheet: {sheet.name}]')
-            for row_idx in range(sheet.nrows):
-                cells = [str(sheet.cell_value(row_idx, col)) for col in range(sheet.ncols)]
-                if any(c.strip() for c in cells):
-                    parts.append('\t'.join(cells))
-        raw = '\n'.join(parts)
-        if raw.strip():
-            text, truncated = _truncate(raw)
-            return ExtractionResult(
-                text=text, file_type='excel', page_count=wb.nsheets,
-                char_count=len(text), was_truncated=truncated,
-            )
-    except ImportError:
-        logger.debug('xlrd not installed — skipping .xls fallback')
-    except Exception as e:
-        logger.info('xlrd failed for %s: %s — trying CSV fallback', filename, e)
+    if zip_allowed:
+        try:
+            import xlrd  # type: ignore
+            wb = xlrd.open_workbook(file_contents=file_bytes)
+            parts = []
+            for sheet in wb.sheets():
+                parts.append(f'[Sheet: {sheet.name}]')
+                for row_idx in range(sheet.nrows):
+                    cells = [str(sheet.cell_value(row_idx, col)) for col in range(sheet.ncols)]
+                    if any(c.strip() for c in cells):
+                        parts.append('\t'.join(cells))
+            raw = '\n'.join(parts)
+            if raw.strip():
+                text, truncated = _truncate(raw)
+                return ExtractionResult(
+                    text=text, file_type='excel', page_count=wb.nsheets,
+                    char_count=len(text), was_truncated=truncated,
+                )
+        except ImportError:
+            logger.debug('xlrd not installed — skipping .xls fallback')
+        except Exception as e:
+            logger.info('xlrd failed for %s: %s — trying CSV fallback', filename, e)
 
     # ── Strategy 3: CSV fallback ──────────────────────────────────────────────
     try:
@@ -338,6 +370,47 @@ def _extract_excel(file_bytes: bytes, filename: str) -> ExtractionResult:
     )
 
 
+def _xlsx_sheets_allowed(file_bytes: bytes, filename: str) -> bool:
+    """
+    Pre-check before openpyxl. In read-only mode openpyxl decompresses each
+    sheet's part once inside load_workbook (ReadOnlyWorksheet scans its
+    dimensions) and again on iteration, once per sheet that references it.
+    Sheets aliasing one part therefore multiply decompression past the ZIP
+    caps, so reject that, and workbooks over MAX_XLSX_SHEETS.
+
+    Uses openpyxl's own lookup (workbook part from [Content_Types].xml, sheet
+    targets normalised by get_dependents) so the check sees the same parts
+    load_workbook would open. Reads only the manifest, workbook part and its
+    rels. Fails closed: anything unreadable here openpyxl couldn't load either.
+    """
+    try:
+        from openpyxl.packaging.manifest import Manifest
+        from openpyxl.packaging.relationship import get_dependents, get_rels_path
+        from openpyxl.packaging.workbook import WorkbookPackage
+        from openpyxl.reader.excel import _find_workbook_part
+        from openpyxl.xml.constants import ARC_CONTENT_TYPES
+        from openpyxl.xml.functions import fromstring
+
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            manifest = Manifest.from_tree(fromstring(zf.read(ARC_CONTENT_TYPES)))
+            wb_part = _find_workbook_part(manifest).PartName[1:]
+            sheets = WorkbookPackage.from_tree(fromstring(zf.read(wb_part))).sheets
+            rels = get_dependents(zf, get_rels_path(wb_part)).to_dict()
+            targets = [rels[sheet.id].target for sheet in sheets if sheet.id]
+    except Exception as e:
+        logger.info('Workbook pre-check failed for %s: %s — skipping openpyxl', filename, e)
+        return False
+
+    if len(sheets) > MAX_XLSX_SHEETS:
+        logger.warning('Skipping openpyxl for %s: %d sheets exceeds %d',
+                       filename, len(sheets), MAX_XLSX_SHEETS)
+        return False
+    if len(set(targets)) != len(targets):
+        logger.warning('Skipping openpyxl for %s: multiple sheets point to the same part', filename)
+        return False
+    return True
+
+
 def _extract_csv(file_bytes: bytes) -> ExtractionResult:
     text_io = io.StringIO(file_bytes.decode('utf-8', errors='replace'))
     reader = csv.reader(text_io)
@@ -350,6 +423,52 @@ def _extract_csv(file_bytes: bytes) -> ExtractionResult:
     )
 
 
+def _zip_limits_status(file_bytes: bytes, filename: str) -> ZipStatus:
+    """
+    Checks a ZIP upload against the entry-count and total-size caps before
+    any parser decompresses it. 'unreadable' means zipfile.ZipFile() can't
+    open it, e.g. a PDF or .xls with a stray end-of-central-directory
+    signature that zipfile.is_zipfile accepts; each caller decides what
+    that means for its parser.
+
+    file_size is the declared uncompressed size. zipfile never reads past it
+    (a lying header fails the CRC check instead); python-docx and openpyxl
+    read every part through zipfile, and MuPDF inflates into a buffer of the
+    declared size and errors on overflow, so the declared sizes bound each
+    read. Note openpyxl reads a part once per sheet that references it.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            infos = zf.infolist()
+    except Exception as e:
+        logger.info('Could not open %s as a ZIP: %s', filename, e)
+        return 'unreadable'
+
+    total = sum(info.file_size for info in infos)
+    if len(infos) > MAX_ZIP_ENTRIES or total > MAX_ZIP_UNCOMPRESSED_BYTES:
+        logger.warning('Skipping ZIP-based extraction for %s: %d entries, %d bytes uncompressed '
+                       '(limits %d entries, %d bytes)',
+                       filename, len(infos), total, MAX_ZIP_ENTRIES, MAX_ZIP_UNCOMPRESSED_BYTES)
+        return 'over_limits'
+    return 'within_limits'
+
+
+def _zip_allowed(file_bytes: bytes, filename: str) -> bool:
+    """
+    For parsers that only reach ZIP data through Python's zipfile
+    (python-docx, openpyxl, xlrd): True unless file_bytes is a ZIP archive
+    over the limits. 'unreadable' is allowed, since a ZIP that ZipFile()
+    can't open can't be decompressed by them either, and rejecting it would
+    turn away e.g. a legacy .xls with a stray EOCD signature.
+
+    Detection uses zipfile.is_zipfile rather than the PK magic bytes:
+    zipfile also opens archives with data prepended.
+    """
+    if not zipfile.is_zipfile(io.BytesIO(file_bytes)):
+        return True
+    return _zip_limits_status(file_bytes, filename) != 'over_limits'
+
+
 def _extract_word(file_bytes: bytes, filename: str) -> ExtractionResult:
     """
     Layered Word extraction:
@@ -359,31 +478,37 @@ def _extract_word(file_bytes: bytes, filename: str) -> ExtractionResult:
       3. RTF parser    — files that are actually RTF
       4. Binary text   — printable ASCII extraction from any binary as last resort
     """
+    # Both ZIP-based strategies decompress the archive, so check it first.
+    # Over the limits, go straight to the non-ZIP fallbacks (RTF / binary).
+    is_zip = zipfile.is_zipfile(io.BytesIO(file_bytes))
+    zip_allowed = _zip_allowed(file_bytes, filename)
+
     # ── Strategy 1: python-docx (standard .docx) ────────────────────────────
-    try:
-        from docx import Document
-        doc = Document(io.BytesIO(file_bytes))
-        parts = [para.text for para in doc.paragraphs if para.text.strip()]
-        for table in doc.tables:
-            for row in table.rows:
-                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                if cells:
-                    parts.append('\t'.join(cells))
-        raw = '\n'.join(parts)
-        if raw.strip():
-            text, truncated = _truncate(raw)
+    if zip_allowed:
+        try:
+            from docx import Document
+            doc = Document(io.BytesIO(file_bytes))
+            parts = [para.text for para in doc.paragraphs if para.text.strip()]
+            for table in doc.tables:
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                    if cells:
+                        parts.append('\t'.join(cells))
+            raw = '\n'.join(parts)
+            if raw.strip():
+                text, truncated = _truncate(raw)
+                return ExtractionResult(
+                    text=text, file_type='word', page_count=None,
+                    char_count=len(text), was_truncated=truncated,
+                )
+        except ImportError:
             return ExtractionResult(
-                text=text, file_type='word', page_count=None,
-                char_count=len(text), was_truncated=truncated,
+                text='', file_type='word', page_count=None, char_count=0,
+                was_truncated=False,
+                error='Word processing requires python-docx: pip install python-docx',
             )
-    except ImportError:
-        return ExtractionResult(
-            text='', file_type='word', page_count=None, char_count=0,
-            was_truncated=False,
-            error='Word processing requires python-docx: pip install python-docx',
-        )
-    except Exception as e:
-        logger.info('python-docx failed for %s: %s — trying direct ZIP extraction', filename, e)
+        except Exception as e:
+            logger.info('python-docx failed for %s: %s — trying direct ZIP extraction', filename, e)
 
     # ── Strategy 2: Direct ZIP + XML extraction ──────────────────────────────
     # Handles the exact '[Content_Types].xml' error — python-docx requires this
@@ -391,10 +516,9 @@ def _extract_word(file_bytes: bytes, filename: str) -> ExtractionResult:
     # can read it directly with zipfile without caring about the manifest.
     # Triggered by: Pages exports, LibreOffice-created files, repacked .docx,
     # or any OOXML ZIP that's missing its content type declarations.
-    if file_bytes[:2] == b'PK':    # ZIP magic bytes
+    if is_zip and zip_allowed:
         try:
-            import zipfile
-            from xml.etree import ElementTree as ET
+            from defusedxml import ElementTree as ET
 
             with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
                 names = zf.namelist()
