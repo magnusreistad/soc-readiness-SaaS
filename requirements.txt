@@ -23,7 +23,7 @@ charset-normalizer==3.5.2
     # via reportlab
 click==8.5.0
     # via uvicorn
-cryptography==49.0.0
+cryptography==50.0.0
     # via -r requirements.in
 defusedxml==0.7.1
     # via -r requirements.in
@@ -75,7 +75,7 @@ pydantic==2.12.5
     #   openai
 pydantic-core==2.41.5
     # via pydantic
-pyjwt==2.12.1
+pyjwt==2.15.0
     # via -r requirements.in
 pymupdf==1.27.2.2
     # via -r requirements.in
