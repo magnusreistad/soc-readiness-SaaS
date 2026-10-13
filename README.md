@@ -85,7 +85,9 @@ app/                              Shared business logic, imported by api/
 └── reports/                     (currently empty — see Known Limitations)
 
 scripts/                          Entry points: run_api.py, run_collector.py, ad-hoc test scripts
+tests/                            pytest suite (auth, API smoke, control classification, document processing)
 supabase/migrations/              Incremental schema migrations (see Setup — not the full schema)
+.gitlab-ci.yml                    CI pipeline: lint → test → build, plus SAST, secret detection, dependency scanning
 ```
 
 **Auth flow.** The frontend never talks to FastAPI directly. Every request goes
@@ -144,7 +146,7 @@ Full write-up: [Building audit-ready change controls into a GitLab pipeline](htt
 
 ```bash
 git clone <this-repo>
-cd vendor-threat-monitor
+cd soc-readiness-SaaS
 
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt   # dev tooling (ruff, pytest); omit for runtime only
