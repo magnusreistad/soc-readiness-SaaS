@@ -15,7 +15,7 @@ import time
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
@@ -25,6 +25,7 @@ from api import dependencies
 from api.main import app
 
 KID = "test-key"
+RSA_KID = "test-rsa-key"
 ISSUER = f"{dependencies.SUPABASE_URL}/auth/v1"
 
 
@@ -33,13 +34,20 @@ def private_key():
     return ec.generate_private_key(ec.SECP256R1())
 
 
+@pytest.fixture(scope="session")
+def rsa_private_key():
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
 @pytest.fixture
-def jwks_client(private_key, monkeypatch):
-    jwk = jwt.algorithms.ECAlgorithm.to_jwk(private_key.public_key(), as_dict=True)
-    jwk.update({"kid": KID, "alg": "ES256", "use": "sig"})
+def jwks_client(private_key, rsa_private_key, monkeypatch):
+    ec_jwk = jwt.algorithms.ECAlgorithm.to_jwk(private_key.public_key(), as_dict=True)
+    ec_jwk.update({"kid": KID, "alg": "ES256", "use": "sig"})
+    rsa_jwk = jwt.algorithms.RSAAlgorithm.to_jwk(rsa_private_key.public_key(), as_dict=True)
+    rsa_jwk.update({"kid": RSA_KID, "alg": "RS256", "use": "sig"})
 
     client = jwt.PyJWKClient(f"{ISSUER}/.well-known/jwks.json")
-    monkeypatch.setattr(client, "fetch_data", lambda: {"keys": [jwk]})
+    monkeypatch.setattr(client, "fetch_data", lambda: {"keys": [ec_jwk, rsa_jwk]})
     monkeypatch.setattr(dependencies, "_jwks_client", client)
     return client
 
@@ -83,6 +91,18 @@ def test_valid_es256_token_passes(jwks_client, private_key):
     assert user.org_id == 1
     assert user.role == "analyst"
     assert user.email == "user@example.com"
+
+
+def test_valid_rs256_token_passes(jwks_client, rsa_private_key):
+    token = jwt.encode(_claims(), rsa_private_key, algorithm="RS256", headers={"kid": RSA_KID})
+    payload = dependencies._verify_supabase_token(token)
+    assert payload["org_id"] == 1
+
+
+def test_rs256_token_pointing_at_ec_key_is_rejected(jwks_client, rsa_private_key):
+    # RS256 is allowed, but the kid selects the ES256 key: PyJWT binds the
+    # token's alg to the key's alg, so this must not verify.
+    _assert_401(jwt.encode(_claims(), rsa_private_key, algorithm="RS256", headers={"kid": KID}))
 
 
 def test_forged_hs256_token_is_rejected(jwks_client, private_key):

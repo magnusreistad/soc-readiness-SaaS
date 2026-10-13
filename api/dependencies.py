@@ -39,9 +39,12 @@ from jwt.exceptions import PyJWKClientConnectionError
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 
-# Supabase signs access tokens with a single ES256 (EC P-256) key. The
-# algorithm is pinned here and never read from the token header.
-ALLOWED_JWT_ALGORITHMS = ["ES256"]
+# Asymmetric algorithms only; HS256 and "none" stay excluded, and the
+# algorithm is never read from the token header. Supabase currently signs with
+# a single ES256 (EC P-256) key; RS256 keeps auth working if that key is
+# rotated to RSA. Allowing both doesn't reopen algorithm confusion: the PyJWK
+# is passed to decode, so PyJWT also binds the token's alg to the key's alg.
+ALLOWED_JWT_ALGORITHMS = ["ES256", "RS256"]
 JWT_AUDIENCE = "authenticated"
 
 # ---------------------------------------------------------------------------
@@ -128,7 +131,9 @@ def _verify_supabase_token(token: str) -> dict:
         # a bad token, so it is not reported as 401.
         raise
     except pyjwt.PyJWTError as e:
-        logger.warning("JWT verification failed: %s", e)
+        # Log only the error type: never the token, its claims, or the
+        # exception message.
+        logger.warning("JWT verification failed: %s", type(e).__name__)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token.",
