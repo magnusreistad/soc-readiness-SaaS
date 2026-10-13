@@ -31,14 +31,18 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 import httpx
 import jwt as pyjwt
-from jwt.exceptions import InvalidTokenError
+from jwt.exceptions import PyJWKClientConnectionError
 
 # ---------------------------------------------------------------------------
 # Supabase JWT config
 # ---------------------------------------------------------------------------
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
+
+# Supabase signs access tokens with a single ES256 (EC P-256) key. The
+# algorithm is pinned here and never read from the token header.
+ALLOWED_JWT_ALGORITHMS = ["ES256"]
+JWT_AUDIENCE = "authenticated"
 
 # ---------------------------------------------------------------------------
 # Demo mode config
@@ -106,21 +110,24 @@ def _verify_supabase_token(token: str) -> dict:
             detail="SUPABASE_URL is not configured on the server.",
         )
     try:
-        # Read the algorithm from the token itself
-        header = pyjwt.get_unverified_header(token)
-        alg    = header.get("alg", "RS256")
-
         client      = _get_jwks_client()
         signing_key = client.get_signing_key_from_jwt(token)
 
+        # Passing the PyJWK (not signing_key.key) also makes PyJWT check the
+        # token's alg against the key's own algorithm.
         payload = pyjwt.decode(
             token,
-            signing_key.key,
-            algorithms=[alg],
-            options={"verify_aud": False},
+            signing_key,
+            algorithms=ALLOWED_JWT_ALGORITHMS,
+            audience=JWT_AUDIENCE,
+            issuer=f"{SUPABASE_URL.rstrip('/')}/auth/v1",
         )
         return payload
-    except InvalidTokenError as e:
+    except PyJWKClientConnectionError:
+        # Supabase's JWKS endpoint is unreachable: a server-side failure, not
+        # a bad token, so it is not reported as 401.
+        raise
+    except pyjwt.PyJWTError as e:
         logger.warning("JWT verification failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -22,7 +22,8 @@ stages:
   - lint
   - test   # also used by the included security templates
   - build
-# (.pre is implicit; Dependency Scanning's resolution job runs there.)
+# Dependency Scanning reads the committed lock files directly, so no dependency
+# resolution job is needed.
 
 workflow:
   rules:

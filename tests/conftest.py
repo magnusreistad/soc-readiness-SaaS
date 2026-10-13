@@ -23,7 +23,6 @@ _DUMMY_ENV = {
     "SUPABASE_URL": "https://supabase.invalid",
     "SUPABASE_ANON_KEY": "dummy-anon-key",
     "SUPABASE_SERVICE_ROLE_KEY": "dummy-service-role-key",
-    "SUPABASE_JWT_SECRET": "dummy-jwt-secret",
     "SUPABASE_DB_URL": "postgresql://ci:ci@db.invalid:5432/ci",
     "GITHUB_PAT": "",
     "DEMO_MODE": "false",

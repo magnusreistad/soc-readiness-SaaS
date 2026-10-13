@@ -23,7 +23,7 @@ charset-normalizer==3.5.2
     # via reportlab
 click==8.5.0
     # via uvicorn
-cryptography==50.0.0
+cryptography==50.0.2
     # via -r requirements.in
 defusedxml==0.7.1
     # via -r requirements.in
