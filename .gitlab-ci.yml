@@ -14,8 +14,8 @@ include:
   - template: Jobs/SAST.gitlab-ci.yml
   - template: Jobs/Secret-Detection.gitlab-ci.yml
   # SBOM-based dependency scanning (new DS analyzer), Ultimate only. Scans
-  # frontend/package-lock.json directly; a `.pre` resolution job pip-compiles
-  # requirements.txt into a lockfile so transitive Python deps are covered.
+  # frontend/package-lock.json and the committed pip-compile lock files
+  # (requirements.txt, requirements-dev.txt; compiled from the *.in files).
   - template: Jobs/Dependency-Scanning.v2.gitlab-ci.yml
 
 stages:
@@ -34,6 +34,7 @@ variables:
   # run in branch pipelines, which the workflow rules above don't create for
   # feature branches.
   AST_ENABLE_MR_PIPELINES: "true"
+  DS_STATIC_REACHABILITY_ENABLED: "true"
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
   npm_config_cache: "$CI_PROJECT_DIR/.cache/npm"
 
