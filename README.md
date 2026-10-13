@@ -106,6 +106,31 @@ and what the UI prompts the user to upload.
 
 ---
 
+## CI/CD and security controls
+
+Every merge request runs lint, test, and build, plus GitLab SAST, secret detection, and
+SBOM-based dependency scanning with static reachability. `main` is protected and the
+"Pipelines must succeed" check is enforced, so changes reach `main` only through a merged
+merge request with a passing pipeline. GitLab is the source of truth; this GitHub
+repository is a push mirror.
+
+| Control | NIST 800-53 Rev 5 | SOC 2 | NIST SSDF |
+|---|---|---|---|
+| Required MR pipeline | CM-3, CM-3(2), SA-11 | CC8.1 | PO.3.2, PW.8 |
+| Protected branches | CM-5, AC-3 | CC6.1, CC8.1 | PS.1 |
+| SAST | SA-11(1), RA-5 | CC7.1, CC8.1 | PW.7, RV.1, RV.2 |
+| Secret detection | IA-5(7) | CC6.1 | PW.7 |
+| Dependency scanning | RA-5, SI-2, SR-3 | CC7.1 | PW.4, RV.1, RV.2, PS.3.2 |
+| Pipeline artifacts | AU-11, CM-3 | CC4.1 | PO.3.3, PS.3.2 |
+
+Scanner findings are triaged in GitLab's Vulnerability Report, and every dismissal records
+a reason. Known limitations: single maintainer, so approvals are design only; security
+scan jobs inform but don't block merges.
+
+Full write-up: [Building audit-ready change controls into a GitLab pipeline](https://magnusreistad.com/blog/gitlab-devsecops-pipeline/)
+
+---
+
 ## Setup
 
 ### Prerequisites
@@ -122,10 +147,13 @@ git clone <this-repo>
 cd vendor-threat-monitor
 
 python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-dev.txt   # dev tooling (ruff, pytest); omit for runtime only
 
 cd frontend && npm install && cd ..
 ```
+
+Python dependencies are edited in `requirements.in` / `requirements-dev.in` and compiled
+to the pinned `.txt` lock files with `pip-compile` on Python 3.11.
 
 ### 2. Set up Supabase
 
@@ -191,10 +219,6 @@ claim that it's finished:
   hardcodes `org_id=1` when fetching vendors and storing incidents. The rest of
   the platform (controls, evidence, auth) is properly multi-tenant via Supabase
   RLS; the collector hasn't caught up.
-- **No CI or formal test suite yet.** `scripts/test_phase4_security.py` and
-  `scripts/test_pipeline.py` are ad-hoc smoke-test scripts that exercise real
-  code paths (PII scrubbing, prompt injection guards, the classification
-  pipeline) but aren't wired into any CI pipeline or test runner.
 - **Base schema isn't version-controlled.** As noted in Setup, the initial
   Postgres schema was created via the Supabase Studio SQL Editor rather than a
   migration file. `supabase/migrations/` only captures changes made *after*
@@ -204,13 +228,6 @@ claim that it's finished:
   that lived there was removed once its only caller, the Flask `threat_monitor`
   blueprint, was deleted; nothing in the current FastAPI/Next.js stack generates
   PDF exports yet.
-- **`npm audit`** reports 3 high-severity advisories (PostCSS XSS/path traversal, 
-  sharp/libvips CVEs) in dependencies bundled internally by Next.js's image 
-  optimization pipeline. As of Next.js 16.2.12 (the latest release at time of 
-  writing), no patched version is yet available upstream. Confirmed unreachable 
-  in this app: no usage of next/image or sharp anywhere in the codebase (verified 
-  via grep — zero matches outside node_modules). Will resolve automatically on 
-  the next Next.js patch release.
 
 ---
 
